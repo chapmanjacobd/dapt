@@ -59,13 +59,24 @@ fetch_path() {
     if aria2c \
         --allow-overwrite=true \
         --auto-file-renaming=false \
+        --async-dns=false \
         --check-integrity=true \
         --connect-timeout=5 \
         --dir "$target_dir" \
+        --download-result=hide \
+        --enable-http-pipelining=true \
+        --file-allocation=none \
         --follow-metalink=mem \
+        --log-level=warn \
         --max-tries=1 \
+        --max-connection-per-server=4 \
         --out "$target_name" \
+        --seed-time=0 \
+        --show-console-readout=false \
+        --summary-interval=0 \
         --timeout=20 \
+        --bt-stop-timeout=30 \
+        --console-log-level=warn \
         "${base_url}/${rel_path}${metalink_suffix}" >/dev/null 2>&1; then
       return 0
     fi
@@ -74,16 +85,25 @@ fetch_path() {
   if aria2c \
       --allow-overwrite=true \
       --auto-file-renaming=false \
-      --bt-stop-timeout=10 \
+      --async-dns=false \
       --bt-enable-lpd=true \
+      --bt-stop-timeout=30 \
       --check-integrity=true \
       --connect-timeout=5 \
       --dir "$target_dir" \
+      --download-result=hide \
+      --enable-http-pipelining=true \
+      --file-allocation=none \
       --follow-torrent=mem \
+      --log-level=warn \
       --max-tries=1 \
+      --max-connection-per-server=4 \
       --out "$target_name" \
       --seed-time=0 \
+      --show-console-readout=false \
+      --summary-interval=0 \
       --timeout=20 \
+      --console-log-level=warn \
       "${base_url}/${rel_path}.torrent" >/dev/null 2>&1; then
     return 0
   fi
@@ -91,12 +111,21 @@ fetch_path() {
   aria2c \
     --allow-overwrite=true \
     --auto-file-renaming=false \
+    --async-dns=false \
     --check-integrity=true \
     --connect-timeout=5 \
     --dir "$target_dir" \
+    --download-result=hide \
+    --enable-http-pipelining=true \
+    --file-allocation=none \
+    --log-level=warn \
     --max-tries=1 \
+    --max-connection-per-server=4 \
     --out "$target_name" \
+    --show-console-readout=false \
+    --summary-interval=0 \
     --timeout=20 \
+    --console-log-level=warn \
     "${base_url}/${rel_path}" >/dev/null
 }
 

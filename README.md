@@ -19,7 +19,7 @@ So the distribution problem becomes: how do we move the same repo files more fle
 2. publish a normal APT repository
 3. optionally fetch package files through `aria2c`, Metalink, or BitTorrent
 
-`apt-metalink` is useful precedent here, but it is an APT wrapper, not an `/usr/lib/apt/methods` plugin. This POC includes a small native APT method for the transport-shaped part.
+`apt-metalink` is useful precedent here, but it is an APT wrapper, not an `/usr/lib/apt/methods` plugin. `dapt` includes a small native APT method for the transport-shaped part.
 
 ## Repository layout
 
@@ -58,14 +58,15 @@ So the distribution problem becomes: how do we move the same repo files more fle
   --label "DAPT Demo" \
   --suite stable \
   --codename stable \
+  --components main staging \
   --architectures amd64 all
 ```
 
 That creates:
 
-- `repo/pool/main/` for `.deb` files
-- `repo/dists/stable/main/binary-amd64/Packages.gz`
-- `repo/dists/stable/main/binary-all/Packages.gz`
+- `repo/pool/<component>/` for `.deb` files in each configured component
+- `repo/dists/stable/<component>/binary-amd64/Packages.gz`
+- `repo/dists/stable/<component>/binary-all/Packages.gz`
 - `repo/dists/stable/Release`
 
 If you pass `--sign-with <gpg-key-id>`, `dapt.py` also writes `InRelease` and `Release.gpg`.
@@ -75,6 +76,7 @@ If you pass `--sign-with <gpg-key-id>`, `dapt.py` also writes `InRelease` and `R
 ```bash
 ./scripts/dapt.py new-product \
   climate-hourly \
+  --component staging \
   --maintainer "Data Team <data@example.com>" \
   --summary "Climate snapshots" \
   --description "Hourly climate snapshots packaged as a versioned APT data product."
@@ -103,8 +105,8 @@ That:
 
 1. reads `product.toml`
 2. builds a data-only Debian package with `dpkg-deb`
-3. copies it into `repo/pool/main/`
-4. regenerates `Packages`, `Packages.gz`, and `Release`
+3. copies it into `repo/pool/<product-component>/`
+4. regenerates `Packages`, `Packages.gz`, and `Release` for every configured component
 
 By default, payload files install under:
 
@@ -122,7 +124,7 @@ python3 -m http.server --directory repo 8000
 
 ### 5. Install from a Debian/Ubuntu client
 
-For an unsigned local POC:
+For an unsigned local repo:
 
 ```bash
 echo "deb [trusted=yes] file:/ABSOLUTE/PATH/TO/repo stable main" | \
@@ -176,16 +178,6 @@ The transport intentionally stays small:
 
 Metadata stays on the direct path because APT stores index files under temp names that do not match the filenames encoded in torrent or Metalink sidecars.
 
-### What the transport does not do yet
-
-- `dapt+file` or `dapt+mirror`
-- sidecar-driven metadata downloads
-- auth/proxy-specific config handling
-- by-hash specialization
-- pipeline/depth tuning
-
-For a POC, that direct-metadata / sidecar-package split is the most reliable behavior.
-
 ## Product manifest
 
 `product.toml` stays intentionally small:
@@ -193,6 +185,7 @@ For a POC, that direct-metadata / sidecar-package split is the most reliable beh
 ```toml
 name = "climate-hourly"
 package = "dapt-climate-hourly"
+component = "staging"
 maintainer = "Data Team <data@example.com>"
 summary = "Climate snapshots"
 description = """
@@ -212,11 +205,11 @@ remote_torrent_url = ""
 remote_metalink_url = ""
 ```
 
+`component` is part of the product definition. Products without an explicit component are treated as `main`. `dapt` does not currently prevent the same package version from being published to multiple components.
+
 ## Remote-backed products
 
 Some datasets are too large or too externally hosted to bundle into the repo. For those, `dapt` also supports `source_type = "remote"`: APT still installs a normal package, but the package's maintainer script uses `aria2c` to fetch the real payload from upstream or LAN-local alternates.
-
-That is the practical stand-in for a "virtual repo entry" in this POC: APT still sees a real package, but the payload comes from remote content instead of being embedded in the `.deb`.
 
 Example for a Kiwix/Wikimedia-style source:
 

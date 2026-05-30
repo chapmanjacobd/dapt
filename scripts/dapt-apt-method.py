@@ -265,20 +265,24 @@ def download_with_aria2(
         "aria2c",
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
+        "--async-dns=false",
+        "--download-result=hide",
+        "--enable-http-pipelining=true",
         "--connect-timeout=5",
         "--continue=true",
         "--dir",
         str(tempdir),
         "--file-allocation=none",
+        "--log-level=warn",
         "--max-tries=1",
         "--max-connection-per-server=4",
         "--min-split-size=1M",
         "--no-conf=true",
+        "--show-console-readout=false",
         "--summary-interval=0",
         "--console-log-level=warn",
         "--remote-time=true",
         "--timeout=20",
-        request_uri,
     ]
 
     if checksum is not None and mode == "direct":
@@ -289,16 +293,18 @@ def download_with_aria2(
             [
                 "--follow-torrent=mem",
                 "--bt-enable-lpd=true",
-                "--bt-stop-timeout=10",
+                "--bt-stop-timeout=30",
                 "--seed-time=0",
             ]
         )
     elif mode in {"meta4", "metalink"}:
-        command.extend(["--follow-metalink=mem"])
+        command.extend(["--follow-metalink=mem", "--bt-stop-timeout=30", "--seed-time=0"])
     elif mode == "direct":
         command.extend(["--out", target_name(real_uri)])
     else:
         raise TransportError(f"unsupported download mode {mode}", reason="GeneralFailure")
+
+    command.append(request_uri)
 
     completed = subprocess.run(command, capture_output=True, text=True)
     if completed.returncode == 0:

@@ -23,6 +23,7 @@ DEFAULT_BUILD_ROOT = Path(".dapt/build")
 REPO_CONFIG_NAME = "dapt-repo.toml"
 PRODUCT_MANIFEST_NAME = "product.toml"
 PACKAGE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]+$")
+COMPONENT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 SOURCE_TYPES = {"local", "remote"}
 
 
@@ -70,6 +71,44 @@ def ensure_source_type(source_type: str) -> str:
     if normalized not in SOURCE_TYPES:
         fail(f"source_type must be one of: {', '.join(sorted(SOURCE_TYPES))}")
     return normalized
+
+
+def ensure_component_name(name: str) -> str:
+    normalized = name.strip().lower().replace("_", "-")
+    if not COMPONENT_NAME_PATTERN.fullmatch(normalized):
+        fail(
+            "component names must match Debian repo conventions "
+            "(lowercase letters, digits, plus, dot, and hyphen)"
+        )
+    return normalized
+
+
+def normalize_components(values: Iterable[str]) -> list[str]:
+    components: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        component = ensure_component_name(str(value))
+        if component not in seen:
+            components.append(component)
+            seen.add(component)
+    if not components:
+        fail("repository must define at least one component")
+    return components
+
+
+def normalize_architectures(values: Iterable[str]) -> list[str]:
+    architectures: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        architecture = str(value).strip().lower()
+        if not architecture:
+            fail("architectures cannot be empty")
+        if architecture not in seen:
+            architectures.append(architecture)
+            seen.add(architecture)
+    if not architectures:
+        fail("repository must define at least one architecture")
+    return architectures
 
 
 def toml_string(value: str) -> str:
@@ -129,8 +168,8 @@ def load_repo_config(repo_root: Path) -> dict:
         "suite": config.get("suite", "stable"),
         "codename": config.get("codename", "stable"),
         "description": config.get("description", "DAPT proof-of-concept repository"),
-        "components": [str(value) for value in config.get("components", ["main"])],
-        "architectures": [str(value) for value in config.get("architectures", ["amd64", "all"])],
+        "components": normalize_components(config.get("components", ["main"])),
+        "architectures": normalize_architectures(config.get("architectures", ["amd64", "all"])),
         "sign_with": str(config.get("sign_with", "")),
     }
 
@@ -141,6 +180,7 @@ def write_product_manifest(path: Path, manifest: dict) -> None:
         [
             f"name = {toml_string(manifest['name'])}",
             f"package = {toml_string(manifest['package'])}",
+            f"component = {toml_string(manifest['component'])}",
             f"maintainer = {toml_string(manifest['maintainer'])}",
             f"summary = {toml_string(manifest['summary'])}",
             'description = """',
@@ -174,23 +214,34 @@ def render_description(summary: str, long_description: str) -> str:
     return "\n".join(lines)
 
 
+def pool_component_dir(repo_root: Path, component: str) -> Path:
+    return repo_root / "pool" / component
+
+
+def dist_component_dir(repo_root: Path, codename: str, component: str) -> Path:
+    return repo_root / "dists" / codename / component
+
+
 def init_repo(args: argparse.Namespace) -> int:
     repo_root = args.repo_root.resolve()
+    components = normalize_components(args.components)
+    architectures = normalize_architectures(args.architectures)
     config = {
         "origin": args.origin,
         "label": args.label,
         "suite": args.suite,
         "codename": args.codename,
         "description": args.description,
-        "components": args.components,
-        "architectures": args.architectures,
+        "components": components,
+        "architectures": architectures,
         "sign_with": args.sign_with or "",
     }
-    (repo_root / "pool" / "main").mkdir(parents=True, exist_ok=True)
-    for architecture in sorted(set(args.architectures)):
-        (repo_root / "dists" / args.codename / "main" / f"binary-{architecture}").mkdir(
-            parents=True, exist_ok=True
-        )
+    for component in components:
+        pool_component_dir(repo_root, component).mkdir(parents=True, exist_ok=True)
+        for architecture in architectures:
+            dist_component_dir(repo_root, args.codename, component).joinpath(
+                f"binary-{architecture}"
+            ).mkdir(parents=True, exist_ok=True)
     write_repo_config(repo_config_path(repo_root), config)
     refresh_repo(repo_root, args.sign_with or "")
     print(repo_root)
@@ -206,6 +257,7 @@ def new_product(args: argparse.Namespace) -> int:
     manifest = {
         "name": product,
         "package": ensure_package_name(args.package or f"dapt-{product}"),
+        "component": ensure_component_name(args.component),
         "maintainer": args.maintainer,
         "summary": args.summary,
         "description": args.description,
@@ -260,6 +312,7 @@ def load_manifest(products_dir: Path, product: str) -> tuple[Path, dict]:
             fail(f"missing required field {field!r} in {manifest_path}")
     manifest["name"] = ensure_package_name(str(manifest["name"]))
     manifest["package"] = ensure_package_name(str(manifest["package"]))
+    manifest["component"] = ensure_component_name(str(manifest.get("component", "main")))
     manifest["depends"] = [str(value) for value in manifest.get("depends", [])]
     manifest["install_prefix"] = str(manifest.get("install_prefix", "/usr/share/dapt/products"))
     manifest["architecture"] = str(manifest.get("architecture", "all"))
@@ -375,13 +428,13 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
             'mkdir -p "$install_dir"',
             "downloaded=0",
             'if [ "$downloaded" -eq 0 ] && [ -n "$metalink_url" ]; then',
-            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --check-integrity=true --connect-timeout=5 --dir "$install_dir" --follow-metalink=mem --max-tries=1 --out "$(basename "$target_file")" --timeout=20 "$metalink_url"; then',
+            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --check-integrity=true --connect-timeout=5 --dir "$install_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --follow-metalink=mem --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$(basename "$target_file")" --seed-time=0 --show-console-readout=false --summary-interval=0 --timeout=20 --bt-stop-timeout=30 --console-log-level=warn "$metalink_url"; then',
             "    downloaded=1",
             "  fi",
             "fi",
             "",
             'if [ "$downloaded" -eq 0 ] && [ -n "$torrent_url" ]; then',
-            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --bt-enable-lpd=true --bt-stop-timeout=10 --check-integrity=true --connect-timeout=5 --dir "$install_dir" --follow-torrent=mem --max-tries=1 --out "$(basename "$target_file")" --seed-time=0 --timeout=20 "$torrent_url"; then',
+            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --bt-enable-lpd=true --bt-stop-timeout=30 --check-integrity=true --connect-timeout=5 --dir "$install_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --follow-torrent=mem --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$(basename "$target_file")" --seed-time=0 --show-console-readout=false --summary-interval=0 --timeout=20 --console-log-level=warn "$torrent_url"; then',
             "    downloaded=1",
             "  fi",
             "fi",
@@ -389,7 +442,7 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
             "set --",
             url_setter,
             'if [ "$downloaded" -eq 0 ] && [ "$#" -gt 0 ]; then',
-            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --continue=true --check-integrity=true --connect-timeout=5 --dir "$install_dir" --max-tries=1 --out "$(basename "$target_file")" --timeout=20 "$@"; then',
+            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --continue=true --check-integrity=true --connect-timeout=5 --dir "$install_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$(basename "$target_file")" --show-console-readout=false --summary-interval=0 --timeout=20 --console-log-level=warn "$@"; then',
             "    downloaded=1",
             "  fi",
             "fi",
@@ -427,7 +480,14 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
 def release_product(args: argparse.Namespace) -> int:
     version = ensure_version(args.version)
     repo_root = args.repo_root.resolve()
+    repo_config = load_repo_config(repo_root)
     product_dir, manifest = load_manifest(args.products_dir.resolve(), args.product)
+    component = manifest["component"]
+    if component not in repo_config["components"]:
+        fail(
+            f"product component {component!r} is not configured in {repo_config_path(repo_root)} "
+            f"(configured: {', '.join(repo_config['components'])})"
+        )
     payload_dir = product_dir / "payload"
     if not payload_dir.exists():
         fail(f"payload directory does not exist: {payload_dir}")
@@ -451,6 +511,7 @@ def release_product(args: argparse.Namespace) -> int:
             [
                 f"product={manifest['name']}",
                 f"package={manifest['package']}",
+                f"component={manifest['component']}",
                 f"version={version}",
                 f"source_type={manifest['source_type']}",
                 f"released_at={datetime.now(timezone.utc).isoformat()}",
@@ -463,7 +524,7 @@ def release_product(args: argparse.Namespace) -> int:
     output_path = build_root / package_filename
     build_deb(package_root, output_path)
 
-    pool_path = repo_root / "pool" / "main" / package_filename
+    pool_path = pool_component_dir(repo_root, component) / package_filename
     pool_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(output_path, pool_path)
     refresh_repo(repo_root, args.sign_with or "")
@@ -501,6 +562,26 @@ def digest_file(path: Path) -> dict[str, str]:
 
 def read_deb_fields(path: Path) -> dict[str, str]:
     return parse_control_fields(run(["dpkg-deb", "-f", str(path)]))
+
+
+def scan_repo_packages(repo_root: Path, components: Iterable[str]) -> dict[str, list[dict]]:
+    packages_by_component: dict[str, list[dict]] = {}
+
+    for component in components:
+        component_packages: list[dict] = []
+        component_pool_dir = pool_component_dir(repo_root, component)
+        component_pool_dir.mkdir(parents=True, exist_ok=True)
+        for deb_path in sorted(component_pool_dir.glob("*.deb")):
+            fields = read_deb_fields(deb_path)
+            component_packages.append(
+                {
+                    "path": deb_path,
+                    "fields": fields,
+                    "architecture": fields.get("Architecture", "all"),
+                }
+            )
+        packages_by_component[component] = component_packages
+    return packages_by_component
 
 
 def render_packages_record(fields: dict[str, str], repo_relative_path: str, size: int, hashes: dict[str, str]) -> str:
@@ -598,41 +679,45 @@ def maybe_sign_release(repo_dist_dir: Path, signing_key: str) -> None:
 def refresh_repo(repo_root: Path, signing_key: str) -> None:
     config = load_repo_config(repo_root)
     dist_dir = repo_root / "dists" / config["codename"]
-    pool_dir = repo_root / "pool" / "main"
-    pool_dir.mkdir(parents=True, exist_ok=True)
     dist_dir.mkdir(parents=True, exist_ok=True)
 
-    packages: list[dict[str, str]] = []
+    packages_by_component = scan_repo_packages(repo_root, config["components"])
     repository_architectures = set(config["architectures"])
     repository_architectures.add("all")
+    records_by_component: dict[str, list[dict[str, str]]] = {}
+    for component, packages in packages_by_component.items():
+        component_records: list[dict[str, str]] = []
+        for package in packages:
+            architecture = package["architecture"]
+            repository_architectures.add(architecture)
+            deb_path = package["path"]
+            rel_path = deb_path.relative_to(repo_root).as_posix()
+            hashes = digest_file(deb_path)
+            component_records.append(
+                {
+                    "architecture": architecture,
+                    "record": render_packages_record(
+                        package["fields"],
+                        rel_path,
+                        deb_path.stat().st_size,
+                        hashes,
+                    ),
+                }
+            )
+        records_by_component[component] = component_records
 
-    for deb_path in sorted(pool_dir.glob("*.deb")):
-        fields = read_deb_fields(deb_path)
-        architecture = fields.get("Architecture", "all")
-        repository_architectures.add(architecture)
-        rel_path = deb_path.relative_to(repo_root).as_posix()
-        hashes = digest_file(deb_path)
-        packages.append(
-            {
-                "architecture": architecture,
-                "record": render_packages_record(
-                    fields,
-                    rel_path,
-                    deb_path.stat().st_size,
-                    hashes,
-                ),
-            }
-        )
-
-    for architecture in sorted(repository_architectures):
-        index_dir = dist_dir / "main" / f"binary-{architecture}"
-        index_dir.mkdir(parents=True, exist_ok=True)
-        records = [
-            package["record"]
-            for package in packages
-            if package["architecture"] in {architecture, "all"}
-        ]
-        write_packages_index(index_dir / "Packages", records)
+    for component in config["components"]:
+        component_dir = dist_component_dir(repo_root, config["codename"], component)
+        component_dir.mkdir(parents=True, exist_ok=True)
+        for architecture in sorted(repository_architectures):
+            index_dir = component_dir / f"binary-{architecture}"
+            index_dir.mkdir(parents=True, exist_ok=True)
+            records = [
+                package["record"]
+                for package in records_by_component.get(component, [])
+                if package["architecture"] in {architecture, "all"}
+            ]
+            write_packages_index(index_dir / "Packages", records)
 
     md5_lines, sha256_lines = release_checksums(dist_dir)
     release_content = "\n".join(
@@ -680,7 +765,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--components",
         nargs="+",
         default=["main"],
-        help="repository components to list in Release",
+        help="repository components to create and publish",
     )
     init_parser.add_argument(
         "--architectures",
@@ -695,6 +780,7 @@ def build_parser() -> argparse.ArgumentParser:
     new_parser.add_argument("name")
     new_parser.add_argument("--products-dir", type=Path, default=DEFAULT_PRODUCTS_DIR)
     new_parser.add_argument("--package", default="")
+    new_parser.add_argument("--component", default="main")
     new_parser.add_argument(
         "--maintainer",
         default="DAPT Maintainer <maintainer@example.com>",
