@@ -8,6 +8,7 @@ What you do need is:
 - `dpkg-deb` to build `.deb` packages
 - `gpg` if you want signed repositories
 - `aria2c` for the offline/LAN transport demo
+- `mkmetalink` as the preferred sidecar generator for Metalink plus BitTorrent
 
 ## Fedora setup
 
@@ -15,13 +16,19 @@ What you do need is:
 sudo dnf install python3 dpkg gnupg2 aria2 git
 ```
 
-Optional tools:
+Install `mkmetalink`:
+
+```bash
+go install github.com/chapmanjacobd/mkmetalink@latest
+```
+
+Make sure `$GOPATH/bin` or `$HOME/go/bin` is on your `PATH`.
+
+Fallback tools if you do not want `mkmetalink`:
 
 ```bash
 sudo dnf install transmission-cli
 ```
-
-or install `mktorrent` from your preferred source if you want `.torrent` creation in addition to `.metalink`.
 
 ## What works on Fedora
 
@@ -58,7 +65,3 @@ Inside that container you can point APT at `file:/repo`.
 4. Use `aria2-sync.sh` to demo HTTP/LAN/offline mirroring without changing the repo format.
 
 Remote-backed products are especially useful from a Fedora dev host: you can publish a small Debian package that points at a large upstream file, plus LAN-local `.torrent` or `.metalink` alternates, without needing to stage the full dataset inside the repo itself.
-
-## Why this split is useful
-
-The dev machine only needs to produce **standard repository files and standard `.deb` packages**. That keeps the tooling portable while leaving package installation to the systems that already ship APT.

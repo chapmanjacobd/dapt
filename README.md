@@ -5,7 +5,7 @@
 The repo is intentionally simple:
 
 - `scripts/dapt.py` initializes a repository, scaffolds a new data product, and releases new versions.
-- `scripts/generate-sidecars.sh` creates `.metalink` files and optional `.torrent` files for repo artifacts.
+- `scripts/generate-sidecars.sh` creates Metalink and BitTorrent sidecars for repo artifacts, preferably with `mkmetalink`.
 - `scripts/aria2-sync.sh` uses `aria2c` to sync an offline/LAN mirror that APT can consume with a normal `file:` source.
 - remote-backed products can ship a tiny `.deb` that fetches a large upstream artifact with `aria2c` at install time.
 
@@ -186,12 +186,12 @@ Example for a Kiwix/Wikimedia-style source:
   --remote-sha256 <sha256>
 ```
 
-If you also have a LAN-local torrent or metalink for the same file, add it to `products/wikipedia-zim/product.toml`:
+If you also have a LAN-local torrent or Metalink for the same file, add it to `products/wikipedia-zim/product.toml`:
 
 ```toml
 source_type = "remote"
 remote_torrent_url = "http://mirror.example.internal:8000/zim/wikipedia_en_all_nopic_2026-05.zim.torrent"
-remote_metalink_url = "http://mirror.example.internal:8000/zim/wikipedia_en_all_nopic_2026-05.zim.metalink"
+remote_metalink_url = "http://mirror.example.internal:8000/zim/wikipedia_en_all_nopic_2026-05.zim.meta4"
 ```
 
 On install, the package prefers:
@@ -208,17 +208,20 @@ The POC keeps the APT repo format unchanged and adds alternate distribution path
 
 ### Generate alternate download descriptors
 
+The preferred generator is [`mkmetalink`](https://github.com/chapmanjacobd/mkmetalink), because it emits both **Metalink v4** (`.meta4`) and **BitTorrent** (`.torrent`) sidecars from the same input file set.
+
 ```bash
 ./scripts/generate-sidecars.sh \
   repo \
   http://mirror.example.internal:8000 \
-  udp://tracker.example.internal:6969/announce
+  http://mirror2.example.internal:8000 \
+  --tracker udp://tracker.example.internal:6969/announce
 ```
 
 That writes sidecars next to repo artifacts:
 
-- `*.metalink` for `aria2c`
-- `*.torrent` when `mktorrent` or `transmission-create` is installed
+- `*.meta4` and `*.torrent` when `mkmetalink` is installed
+- fallback `*.metalink` plus optional `*.torrent` when `mkmetalink` is unavailable
 
 The important point is that the sidecars describe the same `Packages.gz`, `Release`, and `.deb` files APT already understands.
 
@@ -238,8 +241,9 @@ The sync helper:
 1. fetches `Release` and `Packages.gz`
 2. extracts package filenames from `Packages`
 3. prefers `.torrent` sidecars when present
-4. falls back to `.metalink`
-5. falls back again to direct HTTP/file downloads
+4. falls back to `.meta4`
+5. falls back to `.metalink`
+6. falls back again to direct HTTP/file downloads
 
 Once the files exist locally, clients can use normal APT against the mirrored directory:
 
@@ -247,19 +251,3 @@ Once the files exist locally, clients can use normal APT against the mirrored di
 echo "deb [trusted=yes] file:/srv/dapt-mirror stable main" | \
   sudo tee /etc/apt/sources.list.d/dapt-offline.list
 ```
-
-This is the key design choice for offline/LAN use: `aria2c` moves bytes; APT still owns package semantics.
-
-## Notes on prior art
-
-- `apt-metalink` is the closest conceptual fit for the future direction here: keep APT, but hand file acquisition to a metalink-aware helper such as `aria2c`.
-- `nala` is useful inspiration for APT UX and concurrent fetching, but it is more of an APT frontend than a transport-layer answer to offline or BitTorrent-backed distribution.
-
-## What this POC deliberately does not do yet
-
-- install a real custom APT method under `/usr/lib/apt/methods/`
-- manage multi-component repos beyond `main`
-- replace mature repo managers like `reprepro` or `aptly`
-- create torrents without an external torrent creation tool
-
-Those are the natural next steps once the workflow and UX are proven.

@@ -7,8 +7,9 @@ Usage: aria2-sync.sh <base-url> <dest-dir> [codename] [component] [architecture]
 
 This mirrors the APT repository into <dest-dir> using aria2c while preferring:
   1. .torrent sidecars
-  2. .metalink sidecars
-  3. direct downloads
+  2. .meta4 sidecars
+  3. .metalink sidecars
+  4. direct downloads
 
 Example:
   ./scripts/aria2-sync.sh http://mirror.example.internal:8000 /srv/dapt-mirror stable main amd64
@@ -66,16 +67,18 @@ fetch_path() {
     return 0
   fi
 
-  if aria2c \
-      --allow-overwrite=true \
-      --auto-file-renaming=false \
-      --check-integrity=true \
-      --dir "$target_dir" \
-      --follow-metalink=mem \
-      --out "$target_name" \
-      "${base_url}/${rel_path}.metalink" >/dev/null 2>&1; then
-    return 0
-  fi
+  for metalink_suffix in .meta4 .metalink; do
+    if aria2c \
+        --allow-overwrite=true \
+        --auto-file-renaming=false \
+        --check-integrity=true \
+        --dir "$target_dir" \
+        --follow-metalink=mem \
+        --out "$target_name" \
+        "${base_url}/${rel_path}${metalink_suffix}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
 
   aria2c \
     --allow-overwrite=true \
