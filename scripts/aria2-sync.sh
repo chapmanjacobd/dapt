@@ -6,9 +6,9 @@ usage() {
 Usage: aria2-sync.sh <base-url> <dest-dir> [codename] [component] [architecture]
 
 This mirrors the APT repository into <dest-dir> using aria2c while preferring:
-  1. .torrent sidecars
-  2. .meta4 sidecars
-  3. .metalink sidecars
+  1. .meta4 sidecars
+  2. .metalink sidecars
+  3. .torrent sidecars
   4. direct downloads
 
 Example:
@@ -39,10 +39,15 @@ fi
 
 fetch_path() {
   local rel_path="$1"
-  local target_dir target_name local_root
+  local target_dir target_name local_root metalink_protocol_arg
   target_dir="$dest_dir/$(dirname "$rel_path")"
   target_name="$(basename "$rel_path")"
   mkdir -p "$target_dir"
+  metalink_protocol_arg=""
+  case "$base_url" in
+    http://*) metalink_protocol_arg="--metalink-preferred-protocol=http" ;;
+    https://*) metalink_protocol_arg="--metalink-preferred-protocol=https" ;;
+  esac
 
   if [[ "$base_url" == file://* ]]; then
     local_root="${base_url#file://}"
@@ -55,37 +60,49 @@ fetch_path() {
     return 0
   fi
 
-  if aria2c \
-      --allow-overwrite=true \
-      --auto-file-renaming=false \
-      --bt-enable-lpd=true \
-      --check-integrity=true \
-      --dir "$target_dir" \
-      --follow-torrent=mem \
-      --out "$target_name" \
-      "${base_url}/${rel_path}.torrent" >/dev/null 2>&1; then
-    return 0
-  fi
-
   for metalink_suffix in .meta4 .metalink; do
     if aria2c \
         --allow-overwrite=true \
         --auto-file-renaming=false \
         --check-integrity=true \
+        --connect-timeout=5 \
         --dir "$target_dir" \
         --follow-metalink=mem \
+        --max-tries=1 \
         --out "$target_name" \
+        --timeout=20 \
+        ${metalink_protocol_arg:+$metalink_protocol_arg} \
         "${base_url}/${rel_path}${metalink_suffix}" >/dev/null 2>&1; then
       return 0
     fi
   done
 
+  if aria2c \
+      --allow-overwrite=true \
+      --auto-file-renaming=false \
+      --bt-stop-timeout=10 \
+      --bt-enable-lpd=true \
+      --check-integrity=true \
+      --connect-timeout=5 \
+      --dir "$target_dir" \
+      --follow-torrent=mem \
+      --max-tries=1 \
+      --out "$target_name" \
+      --seed-time=0 \
+      --timeout=20 \
+      "${base_url}/${rel_path}.torrent" >/dev/null 2>&1; then
+    return 0
+  fi
+
   aria2c \
     --allow-overwrite=true \
     --auto-file-renaming=false \
     --check-integrity=true \
+    --connect-timeout=5 \
     --dir "$target_dir" \
+    --max-tries=1 \
     --out "$target_name" \
+    --timeout=20 \
     "${base_url}/${rel_path}" >/dev/null
 }
 

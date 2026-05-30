@@ -1,26 +1,25 @@
 # dapt
 
-`dapt` is a proof-of-concept data versioning and distribution tool built on top of APT. It treats each data product as a data-only Debian package, publishes standard APT repository metadata, and keeps the package-manager work where it belongs: dependency resolution, signatures, upgrades, and installation.
+`dapt` is a proof-of-concept data versioning and distribution tool built on top of APT. It packages datasets as Debian packages, publishes a normal APT repository, and adds optional Metalink, BitTorrent, and aria2c-backed transport paths without replacing APT itself.
 
-The repo is intentionally simple:
+For Fedora and other non-Debian development hosts, use [README.non-debian.md](README.non-debian.md).
 
-- `scripts/dapt.py` initializes a repository, scaffolds a new data product, and releases new versions.
-- `scripts/generate-sidecars.sh` creates Metalink and BitTorrent sidecars for repo artifacts, preferably with `mkmetalink`.
-- `scripts/aria2-sync.sh` uses `aria2c` to sync an offline/LAN mirror that APT can consume with a normal `file:` source.
-- remote-backed products can ship a tiny `.deb` that fetches a large upstream artifact with `aria2c` at install time.
-
-For Fedora and other non-Debian development hosts, use the separate guide in [README.non-debian.md](README.non-debian.md).
-
-## Why piggyback on APT instead of building something new?
+## Why piggyback on APT?
 
 Because APT already solves the hard parts:
 
 - dependency resolution
-- package upgrade semantics
-- package integrity and optional repository signing
+- upgrade semantics
+- package integrity and repository signing
 - standard install and removal workflows
 
-That makes the P2P/offline problem a distribution-layer problem, not a package-manager rewrite. The cleanest next step beyond this POC is a custom APT transport under `/usr/lib/apt/methods/`; until then, this repo keeps APT authoritative and uses `aria2c` to pre-position the same repository files over HTTP, Metalink, or BitTorrent.
+So the distribution problem becomes: how do we move the same repo files more flexibly? This repo answers that in three layers:
+
+1. build normal `.deb` data packages
+2. publish a normal APT repository
+3. optionally fetch package files through `aria2c`, Metalink, or BitTorrent
+
+`apt-metalink` is useful precedent here, but it is an APT wrapper, not an `/usr/lib/apt/methods` plugin. This POC includes a small native APT method for the transport-shaped part.
 
 ## Repository layout
 
@@ -34,9 +33,19 @@ That makes the P2P/offline problem a distribution-layer problem, not a package-m
 │       └── product.toml
 └── scripts/
     ├── aria2-sync.sh
+    ├── dapt-apt-method.py
     ├── dapt.py
-    └── generate-sidecars.sh
+    ├── generate-sidecars.sh
+    └── install-apt-transport.sh
 ```
+
+## What the repo gives you
+
+- `scripts/dapt.py` initializes a repo, scaffolds products, and releases versions.
+- `scripts/generate-sidecars.sh` creates Metalink and torrent sidecars, preferably with `mkmetalink`.
+- `scripts/aria2-sync.sh` builds an offline/LAN mirror that APT can consume with `file:`.
+- `scripts/dapt-apt-method.py` is a minimal APT acquire method for `dapt+http://` and `dapt+https://`.
+- `scripts/install-apt-transport.sh` installs that method into `/usr/lib/apt/methods/`.
 
 ## Quickstart
 
@@ -52,7 +61,7 @@ That makes the P2P/offline problem a distribution-layer problem, not a package-m
   --architectures amd64 all
 ```
 
-That creates a standard repo root:
+That creates:
 
 - `repo/pool/main/` for `.deb` files
 - `repo/dists/stable/main/binary-amd64/Packages.gz`
@@ -80,7 +89,7 @@ products/climate-hourly/
 └── product.toml
 ```
 
-Put your actual data files under `products/climate-hourly/payload/`.
+Put your data files under `products/climate-hourly/payload/`.
 
 ### 3. Release a new version
 
@@ -90,20 +99,18 @@ Put your actual data files under `products/climate-hourly/payload/`.
   --repo-root repo
 ```
 
-The release command:
+That:
 
 1. reads `product.toml`
 2. builds a data-only Debian package with `dpkg-deb`
-3. copies the package into `repo/pool/main/`
+3. copies it into `repo/pool/main/`
 4. regenerates `Packages`, `Packages.gz`, and `Release`
 
-By default, payload files are installed under:
+By default, payload files install under:
 
 ```text
 /usr/share/dapt/products/<product>/
 ```
-
-APT keeps the version history in the repository; installed systems upgrade the package normally with `apt install` or `apt upgrade`.
 
 ### 4. Serve or copy the repo
 
@@ -112,8 +119,6 @@ For a quick demo:
 ```bash
 python3 -m http.server --directory repo 8000
 ```
-
-Or point clients at a local mirror directly with `file:`.
 
 ### 5. Install from a Debian/Ubuntu client
 
@@ -129,9 +134,61 @@ sudo apt install dapt-climate-hourly
 
 For a signed repo, import the signing key and use `signed-by=` instead of `trusted=yes`.
 
+## Custom APT transport
+
+This repo now includes a minimal APT acquire method for `dapt+http` and `dapt+https`.
+
+### Install it
+
+On a Debian or Ubuntu client:
+
+```bash
+sudo apt install aria2
+sudo ./scripts/install-apt-transport.sh
+```
+
+That installs:
+
+- `/usr/lib/apt/methods/dapt+http`
+- `/usr/lib/apt/methods/dapt+https`
+
+### Use it
+
+Point APT at the same repository with the custom scheme:
+
+```bash
+echo "deb [trusted=yes] dapt+http://MIRROR_HOST:8000 stable main" | \
+  sudo tee /etc/apt/sources.list.d/dapt-transport.list
+
+sudo apt update
+sudo apt install dapt-climate-hourly
+```
+
+For signed repos, use your normal `signed-by=` configuration instead of `trusted=yes`.
+
+### What the transport does
+
+The transport intentionally stays small:
+
+1. metadata files (`Release`, `InRelease`, `Packages*`) are fetched directly
+2. package files (`.deb`) prefer `.meta4`, then `.metalink`, then `.torrent`, then direct HTTP(S)
+3. direct package downloads forward APT's expected checksums into `aria2c`
+
+Metadata stays on the direct path because APT stores index files under temp names that do not match the filenames encoded in torrent or Metalink sidecars.
+
+### What the transport does not do yet
+
+- `dapt+file` or `dapt+mirror`
+- sidecar-driven metadata downloads
+- auth/proxy-specific config handling
+- by-hash specialization
+- pipeline/depth tuning
+
+For a POC, that direct-metadata / sidecar-package split is the most reliable behavior.
+
 ## Product manifest
 
-`product.toml` is intentionally small and readable:
+`product.toml` stays intentionally small:
 
 ```toml
 name = "climate-hourly"
@@ -155,22 +212,11 @@ remote_torrent_url = ""
 remote_metalink_url = ""
 ```
 
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `dapt.py init-repo` | Create repository layout and metadata config |
-| `dapt.py new-product` | Scaffold `products/<name>/product.toml` and `payload/` |
-| `dapt.py release <product> <version>` | Build a `.deb` and publish it into the repo |
-| `dapt.py refresh-repo` | Rebuild `Packages`, `Packages.gz`, and `Release` |
-
-Run `./scripts/dapt.py --help` to see all flags.
-
 ## Remote-backed products
 
-Some datasets are too large or too externally hosted to bundle into the repository itself. For those, `dapt` also supports a remote source type: APT still installs a normal package, but the package's maintainer script uses `aria2c` to fetch the real payload from upstream or LAN-local alternates.
+Some datasets are too large or too externally hosted to bundle into the repo. For those, `dapt` also supports `source_type = "remote"`: APT still installs a normal package, but the package's maintainer script uses `aria2c` to fetch the real payload from upstream or LAN-local alternates.
 
-That is the practical stand-in for a "virtual repo entry" in this POC: you still get an installable package, but the package points at remote content instead of embedding it.
+That is the practical stand-in for a "virtual repo entry" in this POC: APT still sees a real package, but the payload comes from remote content instead of being embedded in the `.deb`.
 
 Example for a Kiwix/Wikimedia-style source:
 
@@ -196,19 +242,18 @@ remote_metalink_url = "http://mirror.example.internal:8000/zim/wikipedia_en_all_
 
 On install, the package prefers:
 
-1. torrent
-2. metalink
+1. metalink
+2. torrent
 3. direct URLs
 
 So the same product definition can use the internet when available and LAN-local alternates when it is not.
 
 ## aria2c, Metalink, and BitTorrent
 
-The POC keeps the APT repo format unchanged and adds alternate distribution paths around it.
 
-### Generate alternate download descriptors
+### Generate sidecars
 
-The preferred generator is [`mkmetalink`](https://github.com/chapmanjacobd/mkmetalink), because it emits both **Metalink v4** (`.meta4`) and **BitTorrent** (`.torrent`) sidecars from the same input file set.
+The preferred generator is [`mkmetalink`](https://github.com/chapmanjacobd/mkmetalink), because it emits both Metalink v4 (`.meta4`) and BitTorrent (`.torrent`) sidecars from the same file set.
 
 ```bash
 ./scripts/generate-sidecars.sh \
@@ -223,7 +268,19 @@ That writes sidecars next to repo artifacts:
 - `*.meta4` and `*.torrent` when `mkmetalink` is installed
 - fallback `*.metalink` plus optional `*.torrent` when `mkmetalink` is unavailable
 
-The important point is that the sidecars describe the same `Packages.gz`, `Release`, and `.deb` files APT already understands.
+### Use the custom transport or use a mirrored cache?
+
+Use the custom APT transport when:
+
+- Debian/Ubuntu clients can reach the repo over HTTP(S)
+- you want `apt update` / `apt install` to fetch package files through `aria2c` automatically
+- you want APT to remain the entry point
+
+Use the offline mirror path when:
+
+- you want to pre-stage files before running APT
+- clients will consume the repo via `file:`
+- you want the simplest fallback with no `/usr/lib/apt/methods/` installation
 
 ### Sync a local mirror with aria2c
 
@@ -240,9 +297,9 @@ The sync helper:
 
 1. fetches `Release` and `Packages.gz`
 2. extracts package filenames from `Packages`
-3. prefers `.torrent` sidecars when present
-4. falls back to `.meta4`
-5. falls back to `.metalink`
+3. prefers `.meta4`
+4. falls back to `.metalink`
+5. falls back to `.torrent`
 6. falls back again to direct HTTP/file downloads
 
 Once the files exist locally, clients can use normal APT against the mirrored directory:
@@ -251,3 +308,16 @@ Once the files exist locally, clients can use normal APT against the mirrored di
 echo "deb [trusted=yes] file:/srv/dapt-mirror stable main" | \
   sudo tee /etc/apt/sources.list.d/dapt-offline.list
 ```
+
+The key design choice is: `aria2c` moves bytes; APT still owns package semantics.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `dapt.py init-repo` | Create repository layout and metadata config |
+| `dapt.py new-product` | Scaffold `products/<name>/product.toml` and `payload/` |
+| `dapt.py release <product> <version>` | Build a `.deb` and publish it into the repo |
+| `dapt.py refresh-repo` | Rebuild `Packages`, `Packages.gz`, and `Release` |
+
+Run `./scripts/dapt.py --help` to see flags.

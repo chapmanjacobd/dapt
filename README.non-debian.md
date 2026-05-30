@@ -47,7 +47,7 @@ APT consumption itself still happens on Debian or Ubuntu systems:
 - `apt update`
 - `apt install dapt-<product>`
 - testing `/etc/apt/sources.list.d/*.list`
-- validating a future custom APT transport
+- installing and validating `/usr/lib/apt/methods/dapt+http`
 
 If you want a clean consumer-side validation loop from Fedora, use a Debian container or VM:
 
