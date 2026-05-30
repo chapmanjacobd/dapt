@@ -295,9 +295,6 @@ def download_with_aria2(
         )
     elif mode in {"meta4", "metalink"}:
         command.extend(["--follow-metalink=mem"])
-        preferred_protocol = preferred_http_protocol(real_uri)
-        if preferred_protocol:
-            command.append(f"--metalink-preferred-protocol={preferred_protocol}")
     elif mode == "direct":
         command.extend(["--out", target_name(real_uri)])
     else:
@@ -330,13 +327,6 @@ def verify_expected_checksum(path: Path, checksum: tuple[str, str, str] | None) 
             f"downloaded file checksum mismatch for {path.name}",
             reason="HashSumMismatch",
         )
-
-
-def preferred_http_protocol(uri: str) -> str | None:
-    scheme = urlsplit(uri).scheme
-    if scheme in {"http", "https"}:
-        return scheme
-    return None
 
 
 def digest_file(path: Path) -> dict[str, str]:

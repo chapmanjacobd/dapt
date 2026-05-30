@@ -64,25 +64,6 @@ if [[ ${#mirror_urls[@]} -eq 0 ]]; then
   exit 1
 fi
 
-strip_torrent_metaurls() {
-  local meta4_path="$1"
-  python3 - "$meta4_path" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-from pathlib import Path
-
-path = Path(sys.argv[1])
-tree = ET.parse(path)
-root = tree.getroot()
-namespace = {'m': 'urn:ietf:params:xml:ns:metalink'}
-for file_node in root.findall('m:file', namespace):
-    for metaurl in list(file_node.findall('m:metaurl', namespace)):
-        if metaurl.attrib.get('mediatype') == 'torrent':
-            file_node.remove(metaurl)
-tree.write(path, encoding='utf-8', xml_declaration=True)
-PY
-}
-
 mkmetalink_available=0
 if command -v mkmetalink >/dev/null 2>&1; then
   mkmetalink_available=1
@@ -118,10 +99,6 @@ while IFS= read -r file; do
       fi
     done
     mkmetalink "${mkmetalink_args[@]}" "$file"
-    meta4_path="${file}.meta4"
-    if [[ -f "$meta4_path" ]]; then
-      strip_torrent_metaurls "$meta4_path"
-    fi
     continue
   fi
 

@@ -39,15 +39,10 @@ fi
 
 fetch_path() {
   local rel_path="$1"
-  local target_dir target_name local_root metalink_protocol_arg
+  local target_dir target_name local_root
   target_dir="$dest_dir/$(dirname "$rel_path")"
   target_name="$(basename "$rel_path")"
   mkdir -p "$target_dir"
-  metalink_protocol_arg=""
-  case "$base_url" in
-    http://*) metalink_protocol_arg="--metalink-preferred-protocol=http" ;;
-    https://*) metalink_protocol_arg="--metalink-preferred-protocol=https" ;;
-  esac
 
   if [[ "$base_url" == file://* ]]; then
     local_root="${base_url#file://}"
@@ -71,7 +66,6 @@ fetch_path() {
         --max-tries=1 \
         --out "$target_name" \
         --timeout=20 \
-        ${metalink_protocol_arg:+$metalink_protocol_arg} \
         "${base_url}/${rel_path}${metalink_suffix}" >/dev/null 2>&1; then
       return 0
     fi
