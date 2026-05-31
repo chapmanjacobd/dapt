@@ -1,6 +1,6 @@
 # dapt
 
-`dapt` is a proof-of-concept data versioning and distribution tool built on top of APT. It packages datasets as Debian packages, publishes a normal APT repository, and adds optional Metalink, BitTorrent, and aria2c-backed transport paths without replacing APT itself.
+`dapt` is a proof-of-concept data versioning and distribution tool built on top of APT. It packages datasets as Debian packages, publishes a normal APT repository, and adds optional Metalink, BitTorrent, aria2c-backed, and rsync-backed distribution paths without replacing APT itself.
 
 For Fedora and other non-Debian development hosts, use [README.non-debian.md](README.non-debian.md).
 
@@ -17,7 +17,7 @@ So the distribution problem becomes: how do we move the same repo files more fle
 
 1. build normal `.deb` data packages
 2. publish a normal APT repository
-3. optionally fetch package files through `aria2c`, Metalink, or BitTorrent
+3. optionally fetch package files through `aria2c`, Metalink, BitTorrent, or rsync-prefetched mirrors
 
 `apt-metalink` is useful precedent here, but it is an APT wrapper, not an `/usr/lib/apt/methods` plugin. `dapt` includes a small native APT method for the transport-shaped part.
 
@@ -36,7 +36,8 @@ So the distribution problem becomes: how do we move the same repo files more fle
     ├── dapt-apt-method.py
     ├── dapt.py
     ├── generate-sidecars.sh
-    └── install-apt-transport.sh
+    ├── install-apt-transport.sh
+    └── rsync-sync.sh
 ```
 
 ## What the repo gives you
@@ -44,6 +45,7 @@ So the distribution problem becomes: how do we move the same repo files more fle
 - `scripts/dapt.py` initializes a repo, scaffolds products, and releases versions.
 - `scripts/generate-sidecars.sh` creates Metalink and torrent sidecars, preferably with `mkmetalink`.
 - `scripts/aria2-sync.sh` builds an offline/LAN mirror that APT can consume with `file:`.
+- `scripts/rsync-sync.sh` syncs a repo tree over `rsync://`, `host::module`, or a local path while keeping metadata updates last.
 - `scripts/dapt-apt-method.py` is a minimal APT acquire method for `dapt+http://` and `dapt+https://`.
 - `scripts/install-apt-transport.sh` installs that method into `/usr/lib/apt/methods/`.
 
@@ -304,6 +306,40 @@ echo "deb [trusted=yes] file:/srv/dapt-mirror stable main" | \
 
 The key design choice is: `aria2c` moves bytes; APT still owns package semantics.
 
+### Sync a local mirror with rsync or rsyncd
+
+APT does **not** accept `rsync://` directly in `sources.list`, so rsync is best treated as a mirror-distribution layer rather than a native APT URI. Sync the repo locally first, then point APT at `file:` or serve that local copy over HTTP.
+
+```bash
+./scripts/rsync-sync.sh \
+  rsync://mirror.example.internal/dapt/repo \
+  /srv/dapt-mirror
+```
+
+The rsync helper intentionally does two passes:
+
+1. sync everything except `dists/` with `--fuzzy` so old `.deb` files can act as basis files when names are similar across versions
+2. sync `dists/` last with `--checksum` so `Release` and `Packages*` flip only after the referenced payloads are present locally
+
+That makes rsync especially attractive for:
+
+- LAN mirrors that already keep older package versions
+- stable-path 100GB-scale payload trees where delta transfer matters more than first-download speed
+- pre-staging a repo into a disconnected site before clients run `apt update`
+
+It is less helpful for one-off client installs of versioned `.deb` files, because APT still downloads complete package files and versioned filenames reduce the chance of delta reuse on the client side.
+
+Minimal `rsyncd` example on the publishing server:
+
+```conf
+[dapt]
+    path = /srv/dapt/repo
+    read only = yes
+    use chroot = yes
+```
+
+Then clients or staging relays can mirror from `rsync://mirror.example.internal/dapt/`.
+
 ## Commands
 
 | Command | Purpose |
@@ -312,5 +348,7 @@ The key design choice is: `aria2c` moves bytes; APT still owns package semantics
 | `dapt.py new-product` | Scaffold `products/<name>/product.toml` and `payload/` |
 | `dapt.py release <product> <version>` | Build a `.deb` and publish it into the repo |
 | `dapt.py refresh-repo` | Rebuild `Packages`, `Packages.gz`, and `Release` |
+| `aria2-sync.sh` | Prefetch a mirror through Metalink, torrent, and direct fallbacks |
+| `rsync-sync.sh` | Prefetch a mirror through rsync/rsyncd with metadata-last updates |
 
 Run `./scripts/dapt.py --help` to see flags.
