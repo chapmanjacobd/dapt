@@ -73,6 +73,14 @@ def ensure_source_type(source_type: str) -> str:
     return normalized
 
 
+def ensure_payload_filename(name: str) -> str:
+    normalized = name.strip()
+    path = Path(normalized)
+    if not normalized or path.name != normalized or normalized in {".", ".."}:
+        fail("remote_filename must be a single file name without path separators")
+    return normalized
+
+
 def ensure_component_name(name: str) -> str:
     normalized = name.strip().lower().replace("_", "-")
     if not COMPONENT_NAME_PATTERN.fullmatch(normalized):
@@ -196,8 +204,10 @@ def write_product_manifest(path: Path, manifest: dict) -> None:
             f"remote_urls = {toml_list(manifest['remote_urls'])}",
             f"remote_filename = {toml_string(manifest['remote_filename'])}",
             f"remote_sha256 = {toml_string(manifest['remote_sha256'])}",
+            f"remote_rsync_url = {toml_string(manifest['remote_rsync_url'])}",
             f"remote_torrent_url = {toml_string(manifest['remote_torrent_url'])}",
             f"remote_metalink_url = {toml_string(manifest['remote_metalink_url'])}",
+            f"remote_store_prefix = {toml_string(manifest['remote_store_prefix'])}",
             "",
         ]
     )
@@ -271,8 +281,10 @@ def new_product(args: argparse.Namespace) -> int:
         "remote_urls": args.remote_url,
         "remote_filename": args.remote_filename,
         "remote_sha256": args.remote_sha256,
+        "remote_rsync_url": args.remote_rsync_url,
         "remote_torrent_url": args.remote_torrent_url,
         "remote_metalink_url": args.remote_metalink_url,
+        "remote_store_prefix": args.remote_store_prefix,
     }
     payload_dir = product_dir / "payload"
     payload_dir.mkdir(parents=True, exist_ok=True)
@@ -283,8 +295,11 @@ def new_product(args: argparse.Namespace) -> int:
             This product uses remote sources.
 
             Optional supplemental files placed here will still be bundled into the package,
-            but the primary payload is downloaded by aria2c into:
-            {args.install_prefix.rstrip('/')}/{product}/
+            but the primary payload is fetched into a DAPT-managed content store under:
+            {args.remote_store_prefix.rstrip('/')}/{product}/<version>/
+
+            The active install path is exposed at:
+            {args.install_prefix.rstrip('/')}/{product}/{args.remote_filename or '<remote_filename>'}
             """
         )
     else:
@@ -323,20 +338,26 @@ def load_manifest(products_dir: Path, product: str) -> tuple[Path, dict]:
     manifest["remote_urls"] = [str(value) for value in manifest.get("remote_urls", [])]
     manifest["remote_filename"] = str(manifest.get("remote_filename", ""))
     manifest["remote_sha256"] = str(manifest.get("remote_sha256", ""))
+    manifest["remote_rsync_url"] = str(manifest.get("remote_rsync_url", ""))
     manifest["remote_torrent_url"] = str(manifest.get("remote_torrent_url", ""))
     manifest["remote_metalink_url"] = str(manifest.get("remote_metalink_url", ""))
+    manifest["remote_store_prefix"] = str(manifest.get("remote_store_prefix", "/var/lib/dapt/store"))
     if manifest["source_type"] == "remote":
         if not manifest["remote_filename"]:
             fail(f"remote products require remote_filename in {manifest_path}")
+        manifest["remote_filename"] = ensure_payload_filename(manifest["remote_filename"])
         if not (
-            manifest["remote_urls"]
+            manifest["remote_rsync_url"]
+            or manifest["remote_urls"]
             or manifest["remote_torrent_url"]
             or manifest["remote_metalink_url"]
         ):
             fail(
-                f"remote products require at least one of remote_urls, "
+                f"remote products require at least one of remote_rsync_url, remote_urls, "
                 f"remote_torrent_url, or remote_metalink_url in {manifest_path}"
             )
+    elif manifest["remote_filename"]:
+        manifest["remote_filename"] = ensure_payload_filename(manifest["remote_filename"])
     return product_dir, manifest
 
 
@@ -354,6 +375,8 @@ def write_control_file(path: Path, manifest: dict, version: str) -> None:
     depends = list(manifest["depends"])
     if manifest["source_type"] == "remote" and "aria2" not in depends:
         depends.append("aria2")
+    if manifest["source_type"] == "remote" and manifest["remote_rsync_url"] and "rsync" not in depends:
+        depends.append("rsync")
     lines = [
         f"Package: {manifest['package']}",
         f"Version: {version}",
@@ -398,15 +421,22 @@ def render_remote_source_manifest(manifest: dict) -> str:
         f"remote_filename = {toml_string(manifest['remote_filename'])}",
         f"remote_sha256 = {toml_string(manifest['remote_sha256'])}",
         f"remote_urls = {toml_list(manifest['remote_urls'])}",
+        f"remote_rsync_url = {toml_string(manifest['remote_rsync_url'])}",
         f"remote_torrent_url = {toml_string(manifest['remote_torrent_url'])}",
         f"remote_metalink_url = {toml_string(manifest['remote_metalink_url'])}",
+        f"remote_store_prefix = {toml_string(manifest['remote_store_prefix'])}",
         "",
     ]
     return "\n".join(lines)
 
 
-def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install_dir: Path) -> None:
+def create_remote_maintainer_scripts(
+    package_root: Path, manifest: dict, install_dir: Path, version: str
+) -> None:
     remote_file = install_dir / manifest["remote_filename"]
+    current_link = install_dir / "current"
+    product_store_dir = Path(manifest["remote_store_prefix"]) / manifest["name"]
+    new_store_dir = product_store_dir / version
     url_setter = "\n".join(
         f"set -- \"$@\" {shlex.quote(url)}" for url in manifest["remote_urls"]
     )
@@ -415,26 +445,76 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
             "#!/bin/sh",
             "set -eu",
             f'install_dir={shlex.quote(install_dir.as_posix())}',
-            f'target_file={shlex.quote(remote_file.as_posix())}',
+            f'active_file_link={shlex.quote(remote_file.as_posix())}',
+            f'current_link={shlex.quote(current_link.as_posix())}',
+            f'store_prefix={shlex.quote(manifest["remote_store_prefix"])}',
+            f'product_name={shlex.quote(manifest["name"])}',
+            f'package_version={shlex.quote(version)}',
+            'product_store_dir="$store_prefix/$product_name"',
+            'new_store_dir="$product_store_dir/$package_version"',
+            'staging_dir="$product_store_dir/.staging-$package_version.$$"',
+            f'remote_filename={shlex.quote(manifest["remote_filename"])}',
+            'staged_file="$staging_dir/$remote_filename"',
+            f'rsync_url={shlex.quote(manifest["remote_rsync_url"])}',
             f'torrent_url={shlex.quote(manifest["remote_torrent_url"])}',
             f'metalink_url={shlex.quote(manifest["remote_metalink_url"])}',
             f'expected_sha256={shlex.quote(manifest["remote_sha256"])}',
+            "",
+            "cleanup_staging() {",
+            '  rm -rf "$staging_dir"',
+            "}",
+            "",
+            "verify_checksum() {",
+            '  if [ -n "$expected_sha256" ]; then',
+            '    printf "%s  %s\\n" "$expected_sha256" "$1" | sha256sum -c -',
+            "  fi",
+            "}",
+            "",
+            "trap cleanup_staging EXIT INT TERM HUP",
             "",
             'if ! command -v aria2c >/dev/null 2>&1; then',
             '  echo "dapt remote packages require aria2c (package: aria2)" >&2',
             "  exit 1",
             "fi",
             "",
-            'mkdir -p "$install_dir"',
+            'mkdir -p "$install_dir" "$product_store_dir"',
+            'old_version="${2:-}"',
+            'old_store_dir=""',
+            'if [ -n "$old_version" ] && [ "$old_version" != "$package_version" ]; then',
+            '  old_store_dir="$product_store_dir/$old_version"',
+            "fi",
+            "",
+            'current_target=""',
+            'if [ -L "$current_link" ]; then',
+            '  current_target="$(readlink -f "$current_link" 2>/dev/null || true)"',
+            "fi",
+            "",
+            'if [ -d "$new_store_dir" ] && [ "$current_target" = "$new_store_dir" ] && [ -f "$new_store_dir/$remote_filename" ]; then',
+            '  verify_checksum "$new_store_dir/$remote_filename"',
+            "  exit 0",
+            "fi",
+            "",
+            'rm -rf "$staging_dir"',
+            'mkdir -p "$staging_dir"',
             "downloaded=0",
+            'if [ "$downloaded" -eq 0 ] && [ -n "$rsync_url" ] && [ -n "$old_store_dir" ] && [ -d "$old_store_dir" ]; then',
+            '  if ! command -v rsync >/dev/null 2>&1; then',
+            '    echo "dapt remote packages require rsync when remote_rsync_url is configured" >&2',
+            "    exit 1",
+            "  fi",
+            '  if rsync --archive --compare-dest="$old_store_dir" --fuzzy --safe-links --contimeout=5 --timeout=20 --no-motd "$rsync_url" "$staged_file"; then',
+            "    downloaded=1",
+            "  fi",
+            "fi",
+            "",
             'if [ "$downloaded" -eq 0 ] && [ -n "$metalink_url" ]; then',
-            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --check-integrity=true --connect-timeout=5 --dir "$install_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --follow-metalink=mem --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$(basename "$target_file")" --seed-time=0 --show-console-readout=false --summary-interval=0 --timeout=20 --bt-stop-timeout=30 --console-log-level=warn "$metalink_url"; then',
+            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --check-integrity=true --connect-timeout=5 --dir "$staging_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --follow-metalink=mem --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$remote_filename" --seed-time=0 --show-console-readout=false --summary-interval=0 --timeout=20 --bt-stop-timeout=30 --console-log-level=warn "$metalink_url"; then',
             "    downloaded=1",
             "  fi",
             "fi",
             "",
             'if [ "$downloaded" -eq 0 ] && [ -n "$torrent_url" ]; then',
-            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --bt-enable-lpd=true --bt-stop-timeout=30 --check-integrity=true --connect-timeout=5 --dir "$install_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --follow-torrent=mem --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$(basename "$target_file")" --seed-time=0 --show-console-readout=false --summary-interval=0 --timeout=20 --console-log-level=warn "$torrent_url"; then',
+            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --bt-enable-lpd=true --bt-stop-timeout=30 --check-integrity=true --connect-timeout=5 --dir "$staging_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --follow-torrent=mem --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$remote_filename" --seed-time=0 --show-console-readout=false --summary-interval=0 --timeout=20 --console-log-level=warn "$torrent_url"; then',
             "    downloaded=1",
             "  fi",
             "fi",
@@ -442,7 +522,7 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
             "set --",
             url_setter,
             'if [ "$downloaded" -eq 0 ] && [ "$#" -gt 0 ]; then',
-            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --continue=true --check-integrity=true --connect-timeout=5 --dir "$install_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$(basename "$target_file")" --show-console-readout=false --summary-interval=0 --timeout=20 --console-log-level=warn "$@"; then',
+            '  if aria2c --allow-overwrite=true --auto-file-renaming=false --async-dns=false --continue=true --check-integrity=true --connect-timeout=5 --dir "$staging_dir" --download-result=hide --enable-http-pipelining=true --file-allocation=none --log-level=warn --max-tries=1 --max-connection-per-server=4 --out "$remote_filename" --show-console-readout=false --summary-interval=0 --timeout=20 --console-log-level=warn "$@"; then',
             "    downloaded=1",
             "  fi",
             "fi",
@@ -452,10 +532,25 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
             "  exit 1",
             "fi",
             "",
-            'if [ -n "$expected_sha256" ]; then',
-            '  printf "%s  %s\\n" "$expected_sha256" "$target_file" | sha256sum -c -',
+            'if [ ! -f "$staged_file" ]; then',
+            '  echo "downloaded remote payload did not produce the expected file" >&2',
+            "  exit 1",
             "fi",
             "",
+            'verify_checksum "$staged_file"',
+            'rm -rf "$new_store_dir"',
+            'mv "$staging_dir" "$new_store_dir"',
+            'ln -s "$new_store_dir" "$current_link.tmp"',
+            'mv -Tf "$current_link.tmp" "$current_link"',
+            'ln -s "current/$remote_filename" "$active_file_link.tmp"',
+            'mv -Tf "$active_file_link.tmp" "$active_file_link"',
+            'if [ -n "$old_store_dir" ] && [ -d "$old_store_dir" ] && [ "$old_store_dir" != "$new_store_dir" ]; then',
+            '  if ! rm -rf "$old_store_dir"; then',
+            '    echo "warning: failed to remove superseded store version $old_store_dir" >&2',
+            "  fi",
+            "fi",
+            "",
+            "trap - EXIT INT TERM HUP",
             "exit 0",
             "",
         ]
@@ -464,9 +559,31 @@ def create_remote_maintainer_scripts(package_root: Path, manifest: dict, install
         [
             "#!/bin/sh",
             "set -eu",
+            f'install_dir={shlex.quote(install_dir.as_posix())}',
+            f'active_file_link={shlex.quote(remote_file.as_posix())}',
+            f'current_link={shlex.quote(current_link.as_posix())}',
+            f'store_prefix={shlex.quote(manifest["remote_store_prefix"])}',
+            f'product_name={shlex.quote(manifest["name"])}',
+            f'package_version={shlex.quote(version)}',
+            'product_store_dir="$store_prefix/$product_name"',
+            'store_version_dir="$product_store_dir/$package_version"',
+            "",
             'case "${1:-}" in',
             "  remove|purge)",
-            f"    rm -f {shlex.quote(remote_file.as_posix())}",
+            '    if [ -L "$current_link" ] && [ "$(readlink -f "$current_link" 2>/dev/null || true)" = "$store_version_dir" ]; then',
+            '      rm -f "$current_link"',
+            '      rm -f "$active_file_link"',
+            "    fi",
+            '    rm -rf "$store_version_dir"',
+            '    rmdir --ignore-fail-on-non-empty "$product_store_dir" 2>/dev/null || true',
+            '    rmdir --ignore-fail-on-non-empty "$install_dir" 2>/dev/null || true',
+            "    ;;",
+            "  failed-upgrade|abort-install|abort-upgrade)",
+            '    rm -rf "$store_version_dir"',
+            '    for path in "$product_store_dir"/.staging-"$package_version".*; do',
+            '      [ -e "$path" ] || continue',
+            '      rm -rf "$path"',
+            "    done",
             "    ;;",
             "esac",
             "exit 0",
@@ -504,7 +621,7 @@ def release_product(args: argparse.Namespace) -> int:
     write_control_file(debian_dir / "control", manifest, version)
     if manifest["source_type"] == "remote":
         write_text(data_root / "remote-source.toml", render_remote_source_manifest(manifest))
-        create_remote_maintainer_scripts(package_root, manifest, data_root)
+        create_remote_maintainer_scripts(package_root, manifest, data_root, version)
     write_text(
         data_root / ".dapt-release.txt",
         "\n".join(
@@ -800,8 +917,10 @@ def build_parser() -> argparse.ArgumentParser:
     new_parser.add_argument("--remote-url", action="append", default=[])
     new_parser.add_argument("--remote-filename", default="")
     new_parser.add_argument("--remote-sha256", default="")
+    new_parser.add_argument("--remote-rsync-url", default="")
     new_parser.add_argument("--remote-torrent-url", default="")
     new_parser.add_argument("--remote-metalink-url", default="")
+    new_parser.add_argument("--remote-store-prefix", default="/var/lib/dapt/store")
     new_parser.set_defaults(func=new_product)
 
     release_parser = subparsers.add_parser("release", help="build and publish a data product version")

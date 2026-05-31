@@ -1,6 +1,6 @@
 # dapt
 
-`dapt` is a proof-of-concept data versioning and distribution tool built on top of APT. It packages datasets as Debian packages, publishes a normal APT repository, and adds optional Metalink, BitTorrent, aria2c-backed, and rsync-backed distribution paths without replacing APT itself.
+`dapt` is a proof-of-concept data versioning and distribution tool built on top of APT. It publishes a normal APT repository, keeps APT as the control plane, and adds optional Metalink, BitTorrent, aria2c-backed, and rsync-backed distribution paths without replacing APT itself.
 
 For Fedora and other non-Debian development hosts, use [README.non-debian.md](README.non-debian.md).
 
@@ -15,7 +15,7 @@ Because APT already solves the hard parts:
 
 So the distribution problem becomes: how do we move the same repo files more flexibly? This repo answers that in three layers:
 
-1. build normal `.deb` data packages
+1. build normal `.deb` packages, including thin installer packages for very large remote datasets
 2. publish a normal APT repository
 3. optionally fetch package files through `aria2c`, Metalink, BitTorrent, or rsync-prefetched mirrors
 
@@ -48,6 +48,23 @@ So the distribution problem becomes: how do we move the same repo files more fle
 - `scripts/rsync-sync.sh` syncs a repo tree over `rsync://`, `host::module`, or a local path while keeping metadata updates last.
 - `scripts/dapt-apt-method.py` is a minimal APT acquire method for `dapt+http://` and `dapt+https://`.
 - `scripts/install-apt-transport.sh` installs that method into `/usr/lib/apt/methods/`.
+
+## Hybrid model for large datasets
+
+`dapt` supports two product shapes:
+
+- **local**: bundle the payload directly into the `.deb`
+- **remote**: publish a tiny control package and keep the large payload in a DAPT-managed store outside the `.deb`
+
+For `source_type = "remote"`, the installed package behaves like an installer package:
+
+1. `postinst` downloads into a staging directory under `/var/lib/dapt/store/<product>/<version>/`
+2. verifies the expected SHA-256 before activation
+3. atomically flips `/usr/share/dapt/products/<product>/current`
+4. exposes a stable active file link at `/usr/share/dapt/products/<product>/<remote_filename>`
+5. removes the superseded stored version only after the new version is live
+
+That keeps APT in charge of package semantics while letting large datasets live outside the `.deb`, stay rollback-friendly during upgrade, and reuse old bytes as rsync basis material.
 
 ## Quickstart
 
@@ -203,15 +220,17 @@ source_type = "local"
 remote_urls = []
 remote_filename = ""
 remote_sha256 = ""
+remote_rsync_url = ""
 remote_torrent_url = ""
 remote_metalink_url = ""
+remote_store_prefix = "/var/lib/dapt/store"
 ```
 
 `component` is part of the product definition. Products without an explicit component are treated as `main`. `dapt` does not currently prevent the same package version from being published to multiple components.
 
 ## Remote-backed products
 
-Some datasets are too large or too externally hosted to bundle into the repo. For those, `dapt` also supports `source_type = "remote"`: APT still installs a normal package, but the package's maintainer script uses `aria2c` to fetch the real payload from upstream or LAN-local alternates.
+Some datasets are too large or too externally hosted to bundle into the repo. For those, use `source_type = "remote"`: APT still installs a normal package, but the package is a thin installer that manages a versioned external content store.
 
 Example for a Kiwix/Wikimedia-style source:
 
@@ -221,27 +240,34 @@ Example for a Kiwix/Wikimedia-style source:
   --source-type remote \
   --maintainer "Data Team <data@example.com>" \
   --summary "Wikipedia ZIM snapshot" \
-  --description "Installs a pinned Wikipedia ZIM snapshot via aria2c." \
+  --description "Installs a pinned Wikipedia ZIM snapshot into the DAPT content store." \
   --remote-url https://dumps.wikimedia.org/kiwix/zim/wikipedia/wikipedia_en_all_nopic_2026-05.zim \
+  --remote-rsync-url rsync://mirror.example.internal/kiwix/wikipedia_en_all_nopic_2026-05.zim \
   --remote-filename wikipedia_en_all_nopic_2026-05.zim \
   --remote-sha256 <sha256>
 ```
 
-If you also have a LAN-local torrent or Metalink for the same file, add it to `products/wikipedia-zim/product.toml`:
+Useful remote-product fields:
 
 ```toml
 source_type = "remote"
+remote_urls = ["https://dumps.wikimedia.org/kiwix/zim/wikipedia/wikipedia_en_all_nopic_2026-05.zim"]
+remote_rsync_url = "rsync://mirror.example.internal/kiwix/wikipedia_en_all_nopic_2026-05.zim"
 remote_torrent_url = "http://mirror.example.internal:8000/zim/wikipedia_en_all_nopic_2026-05.zim.torrent"
 remote_metalink_url = "http://mirror.example.internal:8000/zim/wikipedia_en_all_nopic_2026-05.zim.meta4"
+remote_store_prefix = "/var/lib/dapt/store"
 ```
 
-On install, the package prefers:
+On install or upgrade, the generated maintainer script:
 
-1. metalink
-2. torrent
-3. direct URLs
+1. stages into `<remote_store_prefix>/<product>/<version>`
+2. tries `rsync` first when an older local version exists
+3. falls back to Metalink, then torrent, then direct URLs through `aria2c`
+4. verifies the checksum
+5. atomically switches the active pointer
+6. deletes the superseded stored version only after the switch succeeds
 
-So the same product definition can use the internet when available and LAN-local alternates when it is not.
+`prerm`/`postrm` do **not** delete data on upgrade. Removal only happens on real `remove`/`purge`, while the old version stays available until the new one is active.
 
 ## aria2c, Metalink, and BitTorrent
 
@@ -326,8 +352,9 @@ That makes rsync especially attractive for:
 - LAN mirrors that already keep older package versions
 - stable-path 100GB-scale payload trees where delta transfer matters more than first-download speed
 - pre-staging a repo into a disconnected site before clients run `apt update`
+- remote-backed products whose previous payload version remains in the DAPT store and can act as rsync basis material
 
-It is less helpful for one-off client installs of versioned `.deb` files, because APT still downloads complete package files and versioned filenames reduce the chance of delta reuse on the client side.
+It is less helpful for one-off client installs of versioned `.deb` wrapper packages, because APT still downloads complete package files and versioned filenames reduce the chance of delta reuse on the client side. The higher-value rsync case in this POC is the large external payload, not the tiny `.deb`.
 
 Minimal `rsyncd` example on the publishing server:
 

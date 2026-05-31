@@ -214,6 +214,106 @@ class DaptCliTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("Package: dapt-climate-weekly", staging_packages)
 
+    def test_new_remote_product_manifest_includes_rsync_and_store_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            products_dir = workspace / "products"
+
+            self.assert_ok(
+                self.run_dapt(
+                    workspace,
+                    "new-product",
+                    "kiwix-en",
+                    "--products-dir",
+                    str(products_dir),
+                    "--source-type",
+                    "remote",
+                    "--remote-url",
+                    "https://example.invalid/archive/wikipedia_en.zim",
+                    "--remote-rsync-url",
+                    "rsync://mirror.example.internal/kiwix/wikipedia_en.zim",
+                    "--remote-filename",
+                    "wikipedia_en.zim",
+                    "--remote-sha256",
+                    "a" * 64,
+                    "--remote-store-prefix",
+                    "/srv/dapt-store",
+                )
+            )
+
+            manifest_text = (products_dir / "kiwix-en" / "product.toml").read_text(encoding="utf-8")
+            self.assertIn('remote_rsync_url = "rsync://mirror.example.internal/kiwix/wikipedia_en.zim"', manifest_text)
+            self.assertIn('remote_store_prefix = "/srv/dapt-store"', manifest_text)
+
+    def test_release_remote_product_builds_store_backed_installer_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            repo_root = workspace / "repo"
+            products_dir = workspace / "products"
+
+            self.assert_ok(
+                self.run_dapt(
+                    workspace,
+                    "init-repo",
+                    "--repo-root",
+                    str(repo_root),
+                )
+            )
+            self.assert_ok(
+                self.run_dapt(
+                    workspace,
+                    "new-product",
+                    "kiwix-en",
+                    "--products-dir",
+                    str(products_dir),
+                    "--source-type",
+                    "remote",
+                    "--remote-url",
+                    "https://example.invalid/archive/wikipedia_en.zim",
+                    "--remote-rsync-url",
+                    "rsync://mirror.example.internal/kiwix/wikipedia_en.zim",
+                    "--remote-filename",
+                    "wikipedia_en.zim",
+                    "--remote-sha256",
+                    "a" * 64,
+                )
+            )
+
+            self.assert_ok(
+                self.run_dapt(
+                    workspace,
+                    "release",
+                    "kiwix-en",
+                    "2026.05.30",
+                    "--products-dir",
+                    str(products_dir),
+                    "--repo-root",
+                    str(repo_root),
+                )
+            )
+
+            package_path = repo_root / "pool" / "main" / "dapt-kiwix-en_2026.05.30_all.deb"
+            control_dir = workspace / "control"
+            data_dir = workspace / "data"
+            subprocess.run(["dpkg-deb", "-e", str(package_path), str(control_dir)], check=True)
+            subprocess.run(["dpkg-deb", "-x", str(package_path), str(data_dir)], check=True)
+
+            control_text = (control_dir / "control").read_text(encoding="utf-8")
+            postinst_text = (control_dir / "postinst").read_text(encoding="utf-8")
+            postrm_text = (control_dir / "postrm").read_text(encoding="utf-8")
+            remote_manifest = (
+                data_dir / "usr" / "share" / "dapt" / "products" / "kiwix-en" / "remote-source.toml"
+            ).read_text(encoding="utf-8")
+
+            self.assertIn("Depends: aria2, rsync", control_text)
+            self.assertIn('rsync --archive --compare-dest="$old_store_dir"', postinst_text)
+            self.assertIn('mv -Tf "$current_link.tmp" "$current_link"', postinst_text)
+            self.assertIn('mv -Tf "$active_file_link.tmp" "$active_file_link"', postinst_text)
+            self.assertIn('if ! rm -rf "$old_store_dir"; then', postinst_text)
+            self.assertIn("failed-upgrade|abort-install|abort-upgrade)", postrm_text)
+            self.assertIn('remote_rsync_url = "rsync://mirror.example.internal/kiwix/wikipedia_en.zim"', remote_manifest)
+            self.assertIn('remote_store_prefix = "/var/lib/dapt/store"', remote_manifest)
+
 
 if __name__ == "__main__":
     unittest.main()

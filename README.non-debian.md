@@ -38,7 +38,7 @@ sudo dnf install transmission-cli
 - `./scripts/dapt.py release`
 - `./scripts/generate-sidecars.sh`
 - `./scripts/rsync-sync.sh`
-- remote-backed packages that fetch very large files with `aria2c`
+- remote-backed packages that build thin installer `.deb` files and fetch very large files with `aria2c` and optional `rsync`
 
 In other words, Fedora is a good **authoring and publishing environment** for the proof of concept.
 
@@ -63,10 +63,10 @@ Inside that container you can point APT at `file:/repo`.
 
 1. Author products and release packages from Fedora.
 2. Serve or copy the generated `repo/` tree.
-3. Validate installation from a Debian/Ubuntu VM, container, or physical client.
+3. Validate install and upgrade behavior from a Debian/Ubuntu VM, container, or physical client.
 4. Use `aria2-sync.sh` or `rsync-sync.sh` to demo LAN/offline mirroring without changing the repo format.
 
-Remote-backed products are especially useful from a Fedora dev host: you can publish a small Debian package that points at a large upstream file, plus LAN-local `.torrent` or `.metalink` alternates, without needing to stage the full dataset inside the repo itself.
+Remote-backed products are especially useful from a Fedora dev host: you can publish a small Debian package that points at a large upstream file, keep the payload in `/var/lib/dapt/store/<product>/<version>` on the Debian client, and expose a stable active link under `/usr/share/dapt/products/<product>/` without staging the full dataset inside the repo itself.
 
 ## rsync on a Fedora authoring host
 
@@ -77,3 +77,5 @@ APT clients still need `http(s):`, `file:`, or a custom acquire method, but rsyn
 ```
 
 That is the right place to exploit rsync's delta behavior. It helps most when mirrors retain older package versions or when you are syncing stable-path, very large files into a disconnected site before Debian/Ubuntu clients consume the mirror through `file:` or an HTTP server.
+
+For remote-backed products, you can also set `remote_rsync_url` in `product.toml`. The generated installer package will then try rsync first during upgrade when an older version already exists in the local DAPT store, and fall back to Metalink, BitTorrent, or direct HTTP as needed.
